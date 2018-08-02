@@ -1,0 +1,281 @@
+---
+title: 'BudLabs : Data Challenge'
+author: 'Shriya Gambhir'
+date: 'March 15, 2018'
+output: html_document
+---
+
+# Prelude :
+The following analysis is done for the APS Failure and Operational Data for Scania Trucks.The dataset consists of data collected from heavy Scania trucks in everyday usage. The system in focus is the Air Pressure system (APS) which generates pressurised air that are utilized in various functions in a truck. The datasets' positive class consists of component failures for a specific component of the APS system. The negative class consists of trucks with failures for components not related to the APS.  <br>
+The challenge related to this data set is to minimize the cost metric of mis-classification, i.e we need to minimize the cost that refer to the cost of missing a faulty truck, which may cause a breakdown.(i.e predicting a positive class component as negative class). <br>
+
+The following R packages have been used to perform this analysis : <br>
+1. caret <br>
+2. ggplot2 <br>
+3. ggpubr <br>
+4. glmnet <br>
+5. randomForest<br>
+
+```{r set-options, include = FALSE}
+# setting some default chunk options
+# figures will be centered
+# messages are suppressed
+# warnings are suppressed
+knitr::opts_chunk$set(fig.align = "center", message = FALSE, warning = FALSE)
+```
+
+```{r}
+# all packages needed should be loaded in this chunk
+library(randomForest)
+library(caret)
+library(glmnet)
+library(caret)
+library(gbm)
+library(DMwR)
+library(e1071)
+```
+
+```{r}
+#Loading data (already removed the informative text from data set)
+train_data = read.csv("aps_failure_training_set.csv")
+test_data = read.csv("aps_failure_test_set.csv")
+```
+
+```{r}
+print(paste0("Number of rows are : ", nrow(train_data)))
+print(paste0("Number of columns are : ", ncol(train_data)))
+
+```
+
+** Exploratory Data Analysis **
+
+Looking at basic statistics of the data.
+
+```{r}
+knitr::kable(summary(train_data))
+```
+
+Before we proceed further and delve deeper into our analysis, it is worth performing an exploratory data analysis (EDA) of the data and understand what we are dealing with. This will also help us prepare our data for further analysis. We will be looking at any abnormalities in our data (like datatype of variables, missing values, different factor levels for categorical data, outliers etc) as they might have repurcussions later on in this exercise. <br>
+
+Handling missing data : As there are a lot of missing values, it becomes extremelly important to handle these as otherwise, it will become extremely difficult to find meaningful results.We do this by removing columns if they have more than 80% missing values found and if not , replacing the missing values by the median of that column.Also, the description of the data set says that all predictors are numeric, whereas they are factor variables in the given data set. So, we convert them to numeric.<br>
+
+
+```{r}
+
+# Handling missing values
+
+f = function(x){
+x = as.numeric(as.character(x)) 
+if (sum(is.na(x))/length(x) > 0.8 ){
+ x <- NULL
+}
+else {
+  x = replace(x, is.na(x), median(x, na.rm = TRUE))
+}
+}
+
+train_data2 = train_data
+test_data2 = test_data
+
+test_data2[,2:ncol(test_data)] = apply(test_data2[,2:ncol(test_data)],2,f)
+train_data2[,2:ncol(train_data)] = apply(train_data2[,2:ncol(train_data)],2,f)
+
+ncol(train_data2)
+
+```
+
+We see that 2 columns were removed. Also, since the data contains a lot of zeros and columns with similar values, we try to look for variance of the predictors.
+
+
+```{r}
+#Finding Variance of each column 
+
+x = train_data2
+ss = apply(x, 2, var)
+y = format(ss, scientific = FALSE)
+
+# plot of variance shows only 2 significant predictors
+
+plot(y , xlab = 'Predictors' , ylab = 'Variance' , main = "Predictors vs Variance plot")
+
+# choosing this predictor
+imp_pred = ss[which.max(ss)]
+imp_pred
+
+```
+
+** Choosing Predictors **
+
+Based on the above analysis, we see that only one predictor has considerable variance, while all others have zero variance. So, we choose the one with some variance, as other predictors will not be useful as they will not contribute to the results. <br>    
+
+
+**Model Fitting**
+
+Now we come to actual analysis, where we address the cost metric minimization challenge. So, this is a classification task , with 2 classes - pos(positive) and neg(negative).
+Given, that the data is highly unbalanced and amongst all only 1 or two predictors are significant, we try fitting Lasso for classification . This model will give us the most important variable as well as will give us a model fitted with logistic regression.<br>
+
+Starting with Logistic regression for classification should be the first choice, as it is always advisable to start with the easy model first. Also, it outperforms all other models if the decision boundary is linear. <br>
+
+For the given data set, I tried to look fo the decision boundary but could not succeed in finding the true decision boundary because of the annonymity and the large number of garbage values in the data. This could have been further analysed. <br>
+
+```{r}
+
+# Fitting Lasso with CV
+
+X = model.matrix(class ~ ., train_data2)[, -1]
+y = train_data2$class
+
+fit_cv = cv.glmnet(X, y, family = "binomial", alpha = 1)
+
+
+cv_5 = trainControl(method = "cv", number = 5)
+lasso_grid = expand.grid(alpha = 1, 
+                         lambda = c(fit_cv$lambda.min, fit_cv$lambda.1se))
+
+
+#Logistic model using lasso
+
+sim_data = data.frame(y, X)
+fit_lasso = train(
+  y ~ ., data = sim_data,
+  method = "glmnet",
+  trControl = cv_5,
+  tuneGrid = lasso_grid
+)
+
+prediction_test_lasso = predict(fit_lasso, test_data2[,c(2:length(test_data2))])
+
+# confusion matrix on test
+Lasso_results = confusionMatrix(prediction_test_lasso, test_data2$class)
+```
+
+** Model fit 2 : Random Forest **
+
+Using the variables selected by lasso , we can now try to fit a Random Forest. We chose this model, because it usually takes into account the variability in the data and gives good results in almost all cases.
+
+
+
+```{r}
+#Extracting variables selected by Lasso
+
+tmp_coeffs = coef(fit_cv, s = "lambda.1se")
+tmp_coeffs = data.frame(name = tmp_coeffs@Dimnames[[1]][tmp_coeffs@i + 1], coefficient = tmp_coeffs@x)
+
+```
+
+Fitting the model
+
+```{r eval=FALSE }
+
+#Model with 1 predictor 
+
+oob     = trainControl(method = "oob")
+
+fit_rf  = train(class ~ ac_000, data = train_data2,
+                method = "rf",
+                trControl = oob
+                
+               ) 
+ 
+pred.rf = predict(fit_rf, test_data2)
+
+# confusion matrix on test
+rf_results = confusionMatrix(pred.rf, test_data2$class)
+
+
+```
+
+Randomforest performs fairly well, but not better than Logistic Regression. Now, we try a more sophisticated method, Boosting. Since, it builds sequential trees, by taking into account information gain, it may perform well.
+
+
+```{r}
+library(gbm)
+
+gbm_grid =  expand.grid(interaction.depth = 1:5,
+                        n.trees = (1:6) * 500,
+                        shrinkage = c(0.001, 0.01, 0.1),
+                        n.minobsinnode = 10)
+
+gbm_tune = train(class ~ ac_000, data = train_data2,
+                      method = "gbm",
+                      trControl = cv_5,
+                      verbose = FALSE,
+                      tuneGrid = gbm_grid)
+
+pred_gbm = predict(gbm_tune, test_data2, type = "raw")
+
+# confusion matrix on test
+gbm_results = confusionMatrix(pred_gbm, test_data2$class)
+
+```
+
+
+```{r}
+
+# Comparing cost of the three models
+  
+Cost_1 = 10 
+cost_2 = 500
+Total_cost_lasso = Cost_1* Lasso_results$table[2,1] + cost_2* Lasso_results$table[1,2]
+Total_cost_rf = Cost_1*rf_results$table[2,1] + cost_2*rf_results$table[1,2]
+Total_cost_boost = Cost_1*gbm_results$table[2,1] + cost_2*gbm_results$table[1,2]
+
+```
+
+
+```{r eval=FALSE}
+knitr::kable(data.frame(
+Model = c("Logistic Regression", "Random Forest", "Boosting"),
+ Cost = c(Total_cost_lasso, Total_cost_rf , Total_cost_boost)
+  )
+) 
+```
+
+
+Model	                 Cost<br>
+Logistic Regression	   60990<br>
+Random Forest	         180220<br>
+Boosting	             187500<br>
+
+
+** Results and Comparisons **
+
+From the above table , we can see that Logistic regression performs best , followed by random forest , followed by Gradient Boosted machine. One possible reason for this is that data may have linear boundary and logistic regression works best on the linear boundaries. Random forest works well with non - linear decision boundaries. Also, gbm may have resulted in overfitting of the model whereas Random Forest does not overfit. <br>
+
+
+** Further Work **
+
+I feel the following are some points, I could have worked on with more time.:
+
+1. Performing a more rigorous data exploration : Over the course of this analysis, I stumbled upon various issues which could have been investigated further such as the classes are hugely imbalanced , we could work on resampling the data. Another possible strategy , that I have tried here is to generate synthetic samples. This  increases the minority class observations by using SMOTE (it generates more samples by using K-nearest neighbours). Some deeper analysis in this could have resulted in better and more accurate results. <br>
+
+2. Due to computational and time constraints, I did not get a chance to explore more machine learning techniques such as 1- class SVM and LDA which could have yielded a better Total cost. <br>
+
+3. Visualization : The internet is replete with cool and amazing visualization packages which could aid us in visualizing the different features of the data like plotly <br>
+
+
+
+
+Some additional tasks I was trying to do, but could not finish.
+Generating SSynthesized data.
+
+The below code generates data with 1000 observations in each class.
+
+```{r}
+#SMOTEd data
+
+newdata= SMOTE(class ~ ac_000 , train_data , perc.over = 100, perc.under=200)
+
+ncol(newdata)
+unique(newdata)
+nrow(subset(newdata,class == 'pos'))
+
+fit_rf_new  = train(class ~ ac_000, data = newdata,
+                method = "rf",
+                trControl = oob
+                
+               ) 
+
+```
+
+
